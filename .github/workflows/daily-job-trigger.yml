@@ -1,0 +1,88 @@
+name: Free Tier Daily XML Job Trigger
+on:
+  schedule:
+    # Keep-alive pings every 4 minutes to prevent hibernation
+    - cron: '*/4 * * * *'
+    # Primary job trigger: 5:00 AM UTC (7:00 AM CEST)  
+    - cron: '0 5 * * *'
+    # Backup triggers
+    - cron: '30 5 * * *'
+    - cron: '0 7 * * *'
+  workflow_dispatch: # Allow manual triggering
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event.schedule == '*/4 * * * *'
+    steps:
+      - name: Keep Replit App Alive
+        run: |
+          echo "Pinging Replit app to prevent hibernation..."
+          curl -s -f "${{ secrets.REPLIT_APP_URL }}/api/stats" > /dev/null || echo "App may be sleeping, continuing..."
+
+  trigger-job:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event.schedule != '*/4 * * * *' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Wake Up App and Trigger Job
+        run: |
+          echo "Waking up Replit app and triggering job execution..."
+          
+          # Step 1: Wake up the app with multiple pings
+          echo "Step 1: Waking up app..."
+          for i in {1..3}; do
+            curl -s -f "${{ secrets.REPLIT_APP_URL }}/api/stats" > /dev/null && break || sleep 10
+          done
+          
+          # Step 2: Wait for app to fully initialize
+          echo "Step 2: Waiting for app initialization..."
+          sleep 15
+          
+          # Step 3: Try multiple endpoints for maximum reliability
+          ENDPOINTS=(
+            "${{ secrets.REPLIT_APP_URL }}/api/jobs/check-missed"
+            "${{ secrets.REPLIT_APP_URL }}/api/jobs/2/execute" 
+            "${{ secrets.REPLIT_APP_URL }}/webhook/job/2"
+          )
+          
+          for endpoint in "${ENDPOINTS[@]}"; do
+            echo "Trying endpoint: $endpoint"
+            
+            response=$(curl -s -w "%{http_code}" -X POST "$endpoint" \
+              --max-time 60 \
+              --retry 5 \
+              --retry-delay 10 \
+              --connect-timeout 30)
+            
+            http_code="${response: -3}"
+            body="${response%???}"
+            
+            echo "Response code: $http_code"
+            echo "Response body: $body"
+            
+            if [[ "$http_code" -eq 200 ]]; then
+              echo "✅ Job triggered successfully via $endpoint"
+              exit 0
+            else
+              echo "❌ Failed with code $http_code, trying next endpoint..."
+              sleep 20
+            fi
+          done
+          
+          echo "❌ All endpoints failed - will retry next scheduled time"
+
+      - name: Verify Job Execution
+        if: success()
+        run: |
+          echo "Waiting for job to start..."
+          sleep 30
+          
+          # Check job status
+          response=$(curl -s "${{ secrets.REPLIT_APP_URL }}/api/jobs/2" --max-time 15)
+          echo "Job status check: $response"
+          
+          # Check recent activity
+          activity=$(curl -s "${{ secrets.REPLIT_APP_URL }}/api/activity" --max-time 15)
+          echo "Recent activity: $activity"
